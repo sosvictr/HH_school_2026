@@ -3,13 +3,8 @@
 -- Школа Аналитиков · учебная база hh_school
 -- Автор: Иванова Виктория Владимировна
 -- ============================================================
--- Формат: задания по порядку, каждое начинается с комментария
--- с номером; под каждым запросом — вывод (2–3 предложения).
--- Запрос без вывода не засчитывается.
--- ============================================================
 
 SET search_path TO hh_school;
-
 
 -- ============================================================
 -- БЛОК А. Разминка: термины и структура (текстом)
@@ -39,10 +34,11 @@ SET search_path TO hh_school;
 -- запрос, который покажет, сколько раз в базе встречается самое частое название вакансии.
 SELECT vacancy_name,
 	   count(vacancy_name) as vacancy_name_cnt
-FROM vacancies
-GROUP BY vacancy_name
-ORDER BY vacancy_name_cnt DESC
-LIMIT 1;
+  FROM vacancies
+ GROUP BY vacancy_name
+ ORDER BY vacancy_name_cnt DESC
+ LIMIT 1;
+
 
 -- Самое частое название — «Стажёр: аналитик данных», оно встречается 6 раз
 
@@ -51,7 +47,7 @@ LIMIT 1;
 SELECT count(*) AS total_rows, --52
 	   count(DISTINCT vacancy_name) AS total_vacancies_names, --18
 	   count(*) - count(DISTINCT vacancy_name) as rows_difference --34
-FROM vacancies;
+  FROM vacancies;
 
 -- Вывод:
 -- Запрос показал, что в таблице 52 строки, но уникальных названий только 18, то есть 34 строки
@@ -78,18 +74,18 @@ FROM vacancies;
 -- ЗАДАНИЕ Б1
 -- Запрос: experience
 SELECT DISTINCT experience
-FROM vacancies
-ORDER BY experience;
+  FROM vacancies
+ ORDER BY experience;
 
 -- Запрос: employment
 SELECT DISTINCT employment
-FROM vacancies
-ORDER BY employment;
+  FROM vacancies
+ ORDER BY employment;
 
 -- Запрос: professional_role
 SELECT DISTINCT professional_role
-FROM vacancies
-ORDER BY professional_role;
+  FROM vacancies
+ ORDER BY professional_role;
 
 
 -- Вывод:
@@ -104,15 +100,14 @@ ORDER BY professional_role;
 -- ЗАДАНИЕ Б2
 -- Запрос 1: стажировки в Москве без опыта, вакансия открыта
 SELECT vacancy_id, vacancy_name, salary_from, published_at
-FROM vacancies
-WHERE employment = 'Стажировка'
-	  AND closed_at IS NULL
-      AND experience = 'Нет опыта'
-	  AND area_id = (SELECT area_id
-	  				 FROM areas
-					 WHERE area_name = 'Москва'
-	  )
-ORDER BY published_at DESC;
+  FROM vacancies
+ WHERE employment = 'Стажировка'
+   AND closed_at IS NULL
+   AND experience = 'Нет опыта'
+   AND area_id = (SELECT area_id
+	  			    FROM areas
+				   WHERE area_name = 'Москва')
+ ORDER BY published_at DESC;
 
 -- Проверка: то же самое, но без условия про Москву
 -- SELECT count(*) AS open_internships_all_cities
@@ -123,9 +118,9 @@ ORDER BY published_at DESC;
 
 -- Запрос 2: топ-10 вакансий по salary_from
 SELECT vacancy_name, professional_role, salary_from
-FROM vacancies
-ORDER BY salary_from DESC NULLS LAST
-LIMIT 10;
+  FROM vacancies
+ ORDER BY salary_from DESC NULLS LAST
+ LIMIT 10;
 
 -- Вывод:
 -- Требуемых открытых стажерских позиций без опыта и в Москве найдено 8 штук. Ограничение: у одной из 8 зарплата не указана.
@@ -135,15 +130,25 @@ LIMIT 10;
 
 -- ЗАДАНИЕ Б3
 -- Ловушка 1. NULL — выполнить и объяснить результат
-SELECT count(*) FROM vacancies WHERE closed_at = NULL;
-SELECT count(*) FROM vacancies WHERE closed_at IS NULL;
+SELECT count(*) 
+  FROM vacancies 
+ WHERE closed_at = NULL;
+ 
+SELECT count(*)
+  FROM vacancies
+ WHERE closed_at IS NULL;
 
 -- Ловушка 2. AND / OR — выполнить и объяснить результат
-SELECT count(*) FROM vacancies
-WHERE area_id = 1 OR area_id = 2 AND experience = 'Нет опыта';
+SELECT count(*)
+  FROM vacancies
+ WHERE area_id = 1 
+    OR area_id = 2 
+   AND experience = 'Нет опыта';
 
-SELECT count(*) FROM vacancies
-WHERE (area_id = 1 OR area_id = 2) AND experience = 'Нет опыта';
+SELECT count(*)
+  FROM vacancies
+ WHERE (area_id = 1 OR area_id = 2) 
+   AND experience = 'Нет опыта';
 
 -- Вывод:
 -- 1) Запись closed_at = NULL синтаксически корректна. Однако сравнение с NULL с помощью оператора равенства (=) никогда не истинно.
@@ -168,7 +173,7 @@ SELECT count(*) AS all_vacancies,
        count(salary_from) AS with_salary, -- считаю, что зарплата указана, если заполнено salary_from
        count(DISTINCT professional_role) AS roles,
        count(DISTINCT employer_id) AS employers
-FROM vacancies;
+  FROM vacancies;
 
 
 -- Запрос 2: доля активных вакансий (без JOIN)
@@ -176,7 +181,7 @@ FROM vacancies;
 SELECT count(*) - count(closed_at) AS open_vacancies,
        count(closed_at) AS closed_vacancies,
        round(100.0 * (1 - count(closed_at)::numeric / count(*)), 1) AS active_vacancies
-FROM vacancies;
+  FROM vacancies;
 
 -- Вывод:
 -- 1) В таблице 52 вакансии от 12 работодателей по 5 направлениям. Зарплата указана в 44 вакансиях, то есть у 8 вакансий она пустая.
@@ -194,9 +199,9 @@ SELECT professional_role,
 	   count(*) AS vacancies_count,
 	   count(DISTINCT employer_id) AS employers_count,
 	   round(avg(salary_from)) AS avg_salary_from
-FROM vacancies
-GROUP BY professional_role
-ORDER BY vacancies_count DESC;
+  FROM vacancies
+ GROUP BY professional_role
+ ORDER BY vacancies_count DESC;
 
 -- Запрос 2: то же, только направления с ≥ 5 открытыми вакансиями (WHERE + HAVING)
 
@@ -204,11 +209,11 @@ SELECT professional_role,
 	   count(*) AS vacancies_count,
 	   count(DISTINCT employer_id) AS employers_count,
 	   round(avg(salary_from)) AS avg_salary_from
-FROM vacancies
-WHERE closed_at IS NULL
-GROUP BY professional_role
-HAVING count(*) >= 5
-ORDER BY vacancies_count DESC;
+  FROM vacancies
+ WHERE closed_at IS NULL
+ GROUP BY professional_role
+ HAVING count(*) >= 5
+ ORDER BY vacancies_count DESC;
 
 -- Вывод:
 -- 1) Больше всего вакансий у аналитика данных и разработчика — 31 вакансия из 52 (59,6%).
@@ -232,11 +237,14 @@ ORDER BY vacancies_count DESC;
 -- ЗАДАНИЕ Г1
 -- Запрос: топ-5 по salary_from с названием компании и городом (псевдонимы таблиц)
 SELECT v.vacancy_name, e.employer_name, a.area_name, v.salary_from
-FROM vacancies v
-INNER JOIN employers e ON v.employer_id = e.employer_id
-INNER JOIN areas a ON v.area_id = a.area_id
-ORDER BY v.salary_from DESC NULLS LAST
-LIMIT 5;
+  FROM vacancies v
+	   INNER JOIN employers e 
+	   ON v.employer_id = e.employer_id
+	   
+	   INNER JOIN areas a 
+	   ON v.area_id = a.area_id
+ ORDER BY v.salary_from DESC NULLS LAST
+ LIMIT 5;
 
 -- Вывод:
 -- В топ-5 вакансий по salary_from вошли только позиции уровня Senior: разработчик, дата-инженер и три аналитика данных,
@@ -254,51 +262,115 @@ LIMIT 5;
 SELECT e.employer_name,
        count(DISTINCT v.vacancy_id) AS vacancies,
        count(r.response_id) AS responses
-FROM employers e
-LEFT JOIN vacancies v ON e.employer_id = v.employer_id
-LEFT JOIN responses r ON v.vacancy_id = r.vacancy_id
-GROUP BY e.employer_name
-ORDER BY responses DESC;
+  FROM employers e
+	   LEFT JOIN vacancies v 
+	   ON e.employer_id = v.employer_id
+	   LEFT JOIN responses r 
+	   ON v.vacancy_id = r.vacancy_id
+ GROUP BY e.employer_name
+ ORDER BY responses DESC;
 
 -- проверка для наглядности
 -- SELECT e.employer_name,
 --        v.vacancy_id AS vacancies,
 --        r.response_id AS responses
--- FROM employers e
--- LEFT JOIN vacancies v ON e.employer_id = v.employer_id
--- LEFT JOIN responses r ON v.vacancy_id = r.vacancy_id
--- GROUP BY e.employer_name, v.vacancy_id, r.response_id
--- ORDER BY e.employer_name;
+--   FROM employers e
+-- 	   LEFT JOIN vacancies v 
+-- 	   ON e.employer_id = v.employer_id
+-- 	   LEFT JOIN responses r 
+-- 	   ON v.vacancy_id = r.vacancy_id
+--  GROUP BY e.employer_name, v.vacancy_id, r.response_id
+--  ORDER BY e.employer_name;
 
 
 -- Запрос 2: тот же запрос с INNER JOIN
 SELECT e.employer_name,
        count(DISTINCT v.vacancy_id) AS vacancies,
        count(r.response_id) AS responses
-FROM employers e
-INNER JOIN vacancies v ON e.employer_id = v.employer_id
-INNER JOIN responses r ON v.vacancy_id = r.vacancy_id
-GROUP BY e.employer_name
-ORDER BY responses DESC;
+  FROM employers e
+	   INNER JOIN vacancies v 
+	   ON e.employer_id = v.employer_id
+	   INNER JOIN responses r 
+	   ON v.vacancy_id = r.vacancy_id
+ GROUP BY e.employer_name
+ ORDER BY responses DESC;
 
 
 -- проверка для наглядности
 -- SELECT e.employer_name,
 --        v.vacancy_id AS vacancies,
 --        r.response_id AS responses
--- FROM employers e
--- INNER JOIN vacancies v ON e.employer_id = v.employer_id
--- INNER JOIN responses r ON v.vacancy_id = r.vacancy_id
--- GROUP BY e.employer_name, v.vacancy_id, r.response_id
+--   FROM employers e
+-- 	   INNER JOIN vacancies v 
+-- 	   ON e.employer_id = v.employer_id
+-- 	   INNER JOIN responses r 
+-- 	   ON v.vacancy_id = r.vacancy_id
+--  GROUP BY e.employer_name, v.vacancy_id, r.response_id
 -- ORDER BY e.employer_name;
 
 -- Вывод:
 -- LEFT JOIN вернул 12 работодателей, INNER JOIN вернул 11 работодателей. Из результата INNER пропал ГринЭнерго:
--- его единственная вакансия не получила ни одного отклика. А отчёт HR как раз и должен был показать, у кого
--- интереса нет и с кем стоит поговорить.
--- 
--- Почему вакансии считаются через count(DISTINCT v.vacancy_id): после JOIN строка с вакансией размножается по количеству откликов на нее.
--- Нам нужно количество различных вакансий работодателя, поэтому используем DISTINCT.
+-- его единственная вакансия не получила ни одного отклика.
+
+-- что за вакансия у ГринЭнерго 
+SELECT v.vacancy_name, v.professional_role, v.experience, a.area_name,
+       v.salary_from, v.salary_to,
+       v.published_at::date AS published, 
+	   v.closed_at::date AS closed,
+	   (v.closed_at::date - v.published_at::date) AS days_before_closing
+  FROM vacancies v
+	   JOIN employers e 
+	   ON e.employer_id = v.employer_id
+	   AND e.employer_name = 'ГринЭнерго'
+	   JOIN areas a ON a.area_id = v.area_id
+
+-- У компании одна вакансия «Стажёр: разработчик».
+-- Она была открыта 28 дней (6 апреля – 4 мая).
+-- Ноль откликов может получиться по разным причинам. Некоторые гипотезы разберу ниже.
+
+-- сопоставимые вакансии — разработчики без опыта (считаю, что сопоставимые вакансии, условно те, 
+-- которые привлекают одних и тех же кандидатов)
+
+SELECT e.employer_name, 
+	   v.vacancy_name, 
+	   v.salary_from,
+       v.published_at::date AS published,
+	   v.closed_at::date AS closed,
+	   (v.closed_at::date - v.published_at::date) AS days_before_closing,
+       count(r.response_id) AS responses,
+	   min(r.created_at)::date - v.published_at::date AS days_to_first_response
+  FROM vacancies v
+	   JOIN employers e 
+	   ON e.employer_id = v.employer_id
+	   LEFT JOIN responses r 
+	   ON r.vacancy_id = v.vacancy_id
+ WHERE v.professional_role = 'Разработчик' AND v.experience = 'Нет опыта'
+ GROUP BY e.employer_name, v.vacancy_id, v.vacancy_name, v.salary_from, v.published_at, v.closed_at
+ ORDER BY e.employer_name DESC,
+ 		  v.vacancy_name;
+
+-- Какие объяснения нуля откликов у ГринЭнерго можно предположить:
+-- 1) "Не успели откликнуться": вакансия висела 28 дней, а у других вакансий первый отклик приходил максимум через 15 дней 
+-- (у УралСофт и Северный Код в первый же день).
+-- 2) "Апрель — плохое время для размещения вакансии": апрельские вакансии разработчиков без опыта получили 0, 0 и 6 откликов, 
+-- а опубликованные в другие месяцы — в среднем около 12. Разрыв заметный, но таких вакансий всего три, а данные только за один год,
+-- поэтому отличить сезон от совпадения нельзя.
+-- 3) "К таким вакансиям нет интереса": из 8 вакансий разработчиков без опыта 5 получили от 6 до 27 откликов.
+-- 4) "Нет зарплаты" — проверить нельзя: вакансия без зарплаты одна, сравнивать не с чем. При этом есть вакансии без откликов с зарплатой
+--
+-- Вывод: у вакансии ГринЭнерго результат необычный: не объясняется точно ни сроком, ни тем, что такие вакансии не интересны. Возможно, что 
+-- причина в самой вакансии (описание, требования, место размещения), но по этим данным это не доказать.
+--
+-- Вывод дл hr: у вакансий может быть разная причина, почему на них не откликаются, поэтому одно количество откликов
+-- не даёт полезной метрики. Нужно изучать интенсивность откликов по каждой вакансии и как это зависит от особенностей вакансии и не только
+-- (сезон, направление, опыт, зарплата, срок размещения). Например, у ГринЭнерго за 28 дней нет ни одного отклика,
+-- хотя у похожих вакансий первый приходил максимум через 15 дней. Без такого разбора нельзя понять,
+-- нет ли интереса к вакансии или дело в том, как она оформлена или других обстоятельстваз.
+
+-- Почему исчезновение ГринЭнерго — содержательная потеря, а не техническая мелочь:
+-- Отчёт для HR показывает, как работодатели получают отклики, и нужен, чтобы увидеть слабые места. Для дальнейшего анализа откликов 
+-- это искажает результат: пропадают нулевые значения, и средние показатели, доля работодателей с откликами и охват выглядят лучше, 
+-- чем есть на самом деле.
 --
 -- Правило выбора: перед JOIN задаю себе вопрос "должны ли в результате остаться строки левой таблицы, у которых
 -- нет пары?". Если я строю отчёт по списку объектов и ноль — это тоже ответ, нужен LEFT JOIN.
@@ -318,9 +390,9 @@ SELECT date_trunc('month', created_at)::date AS month,
        count(*) FILTER (WHERE status = 'invited') AS invited,
        round(100.0 * count(*) FILTER (WHERE status = 'invited')
              / nullif(count(*), 0), 1) AS conversion_pct
-FROM responses
-GROUP BY 1
-ORDER BY 1;
+  FROM responses
+ GROUP BY 1
+ ORDER BY 1;
 
 
 -- Вывод:
@@ -360,10 +432,11 @@ SELECT v.professional_role,
              / nullif(count(DISTINCT v.vacancy_id), 0), 1) AS responses_per_vacancy,
        round(100.0 * count(r.response_id) FILTER (WHERE r.status = 'invited')
              / nullif(count(r.response_id), 0), 1) AS conversion_pct
-FROM vacancies v
-LEFT JOIN responses r ON v.vacancy_id = r.vacancy_id
-GROUP BY v.professional_role
-ORDER BY conversion_pct DESC;
+  FROM vacancies v
+	   LEFT JOIN responses r 
+	   ON v.vacancy_id = r.vacancy_id
+ GROUP BY v.professional_role
+ ORDER BY conversion_pct DESC;
 
 
 -- Письменные ответы:
@@ -402,20 +475,27 @@ ORDER BY conversion_pct DESC;
 -- 4. count(r.response_id) / count(*). После JOIN оба значения равны числу строк, и результат 1.
 -- 5. count(r.response_id) / count(*). Не учтена арифметика с NULL, если нет откликов, то вернет NULL.
 -- 6. sum(v.salary_from). Суммируются также все размноженные после JOIN вакансии по несколько раз.
+-- 7. sum(v.salary_from). Неудачная метрика: сумма нижних границ зарплат по разным вакансиям не дает четкого представления об уровне оплаты 
+-- в направлении. Для сравнения оплаты труда направлений нужна средняя зарплата на одну вакансию.
+
+WITH responses_per_vacancy AS (
+     SELECT vacancy_id,
+           count(*) AS responses
+       FROM responses
+      GROUP BY vacancy_id
+)
 
 SELECT v.professional_role,
        count(*) AS vacancies,
-       sum(v.salary_from) AS total_salary,
+       round(1.0 * avg(v.salary_from), 1) AS avg_salary, -- введем среднюю зарплату открытых вакансий среди тех, где она указана
        round(1.0 * sum(coalesce(r.responses, 0))
              / nullif(count(*), 0), 1) AS responses_per_vacancy
-FROM vacancies v
-LEFT JOIN (SELECT vacancy_id,
-                  count(*) AS responses
-           FROM responses
-           GROUP BY vacancy_id) r ON r.vacancy_id = v.vacancy_id
-WHERE v.closed_at IS NULL
-GROUP BY v.professional_role
-ORDER BY vacancies DESC;
+  FROM vacancies v
+	   LEFT JOIN responses_per_vacancy r 
+	   ON r.vacancy_id = v.vacancy_id
+ WHERE v.closed_at IS NULL
+ GROUP BY v.professional_role
+ ORDER BY vacancies DESC;
 
 
 -- Какие два правила из лекции защитили бы от этих ошибок при написании запроса:
