@@ -26,8 +26,11 @@ SELECT COUNT(*) FILTER (WHERE vacancy_id IS NULL) AS null_vacancy_id,
        COUNT(*) FILTER (WHERE sent_at IS NULL) AS null_event_at
   FROM messages;
 
--- Комментарий: эти значения необходимы для построения истории коммуникаций
--- по откликам. Пропуск в любой из этих колонок нарушал бы сам факт коммуникации,
+-- Комментарий: 
+-- vacancy_id, employer_id и время события — базис коммуникации:
+-- без них нельзя сказать, кто, по какой вакансии и когда связался с кандидатом,
+-- а значит, нельзя поставить событие в таймлайн отклика и посчитать время реакции.
+-- Пропуск в любой из этих колонок нарушал бы сам факт коммуникации,
 -- и такую строку пришлось бы исключать из слоя. Проблемы в данных не найдено, поэтому 
 -- ничего не исключается.
 
@@ -46,9 +49,11 @@ SELECT COUNT(*) FILTER (WHERE sender_role IS NULL),
        COUNT(*) FILTER (WHERE message_meta IS NULL)
   FROM messages;
 
--- Комментарий: Пропуск в них не отменяет факт коммуникации, а влияет только 
+-- Комментарий: 
+-- Пропуск в них не отменяет факт коммуникации, а влияет только 
 -- на метрики по самой колонке (длительность звонков, каналы, прочтения, вложения, теги).
 -- Такие строки остаются в слое событий и исключаются только из расчёта соответствующего показателя.
+-- Проблемы в данных не найдено, поэтому ничего не исключается.
 -- Оговорка: проверка call_tags и message_meta примитивная, она ловит только NULL. 
 -- Пустой массив тегов или пустой объект метаданных она не обнаружит. Такие значения
 -- формально не NULL, но полезной информации не несут.
@@ -65,7 +70,9 @@ SELECT COUNT(*) AS call_cnt_with_no_response
           WHERE r.response_id = c.response_id -- так операция = с null не определена, такие строки также исключаются
        );
 	   
-SELECT c.call_id
+SELECT c.call_id,
+	   c.status,
+	   c.caller_role
   FROM calls c
  WHERE NOT EXISTS (
          SELECT r.response_id
@@ -91,10 +98,28 @@ SELECT m.message_id
        );
 	   
 -- Комментарий: 
--- Проблема затрагивает сам факт коммуникации. Коммуникацию нельзя
--- отнести ни к какому отклику. ... Такие строки исключаем.
+-- Найдено 8 звонков без отклика, у всех response_id IS NULL. Сообщений без отклика — 0.
+-- Все 8 — исходящие звонки работодателя (5 unsuccessful, 3 successful).
+-- Проблема затрагивает сам факт коммуникации: без response_id звонок нельзя однозначно
+-- привязать к отклику и учесть в витрине.
 
--- 3) Согласованность данных внутри таблицы (нет противоречий)
+-- можно ли восстановить связь по паре вакансия + кандидат
+SELECT c.call_id,
+       c.call_at,
+       r.response_id,
+       r.created_at,
+       c.call_at < r.created_at AS is_before_response
+  FROM calls c
+       JOIN responses r
+       ON r.vacancy_id = c.vacancy_id
+       AND r.resume_id = c.applicant_id
+ WHERE c.response_id IS NULL;
+
+-- Попытка восстановить связь по vacancy_id + applicant_id показала: каждому звонку
+-- соответствует отклик, но все 8 звонков состоялись до создания этого отклика,
+-- то есть реакцией на отклик они не являются. Такие строки исключаем.
+
+-- 3) Согласованность данных между таблицами (нет противоречий)
 
 -- в коммуникациях поля с данными о вакансии и отклике заполнены верно
 
@@ -107,15 +132,6 @@ SELECT COUNT(*) FILTER (WHERE c.employer_id <> v.employer_id) AS cnt_employer, -
   	   JOIN vacancies v 
 	   ON v.vacancy_id = r.vacancy_id;
 
-SELECT c.call_id
-  FROM calls c
-  	   JOIN responses r 
-	   ON r.response_id = c.response_id
-  	   JOIN vacancies v 
-	   ON v.vacancy_id = r.vacancy_id
- WHERE c.employer_id <> v.employer_id
-    OR r.resume_id <> c.applicant_id;
-
 -- messages
 SELECT COUNT(*) FILTER (WHERE m.employer_id <> v.employer_id) AS cnt_employer,
        COUNT(*) FILTER (WHERE r.resume_id <> m.applicant_id) AS cnt_applicant
@@ -125,43 +141,24 @@ SELECT COUNT(*) FILTER (WHERE m.employer_id <> v.employer_id) AS cnt_employer,
   	   JOIN vacancies v 
 	   ON v.vacancy_id = r.vacancy_id;
 
-SELECT m.message_id
-  FROM messages m
-  	   JOIN responses r 
-	   ON r.response_id = m.response_id
-  	   JOIN vacancies v 
-	   ON v.vacancy_id = r.vacancy_id
- WHERE m.employer_id <> v.employer_id
-    OR r.resume_id <> m.applicant_id;
-
--- Комментарий: Если данные по коммуникаци, отклику и информации о вакансии 
--- не согласуются между собой, проблема влияет на факт коммуникации, поскольку ...
--- Такие строки пришлось бы исключать. Проблемы в данных не найдено, поэтому 
+-- Комментарий: 
+-- Проверяем, что работодатель в событии совпадает с владельцем вакансии,
+-- а кандидат — с автором резюме из отклика. При расхождении событие могло быть
+-- привязано к чужому отклику и исказило бы и таймлайн отклика, и метрики работодателя,
+-- поэтому такие строки пришлось бы исключать. Проблемы в данных не найдено, поэтому 
 -- ничего не исключается.
 
 -- 4) Временные аномалии
 
 -- calls
-SELECT COUNT(*) AS cnt_before_response,
+SELECT COUNT(*) AS cnt_before_response
   FROM calls c
   	   JOIN responses r 
 	   ON r.response_id = c.response_id -- смотрим только из тех, что в откликах
  WHERE  r.created_at > c.call_at;
 
-SELECT c.call_id
-  FROM calls c
-  	   JOIN responses r 
-	   ON r.response_id = c.response_id
- WHERE  r.created_at > c.call_at;
-
 -- messages
 SELECT COUNT(*) AS cnt_before_response
-  FROM messages m
-  	   JOIN responses r 
-	   ON r.response_id = m.response_id
- WHERE  r.created_at > m.sent_at;
-
-SELECT m.message_id
   FROM messages m
   	   JOIN responses r 
 	   ON r.response_id = m.response_id
@@ -173,45 +170,105 @@ SELECT m.message_id
 -- строки пришлось бы исключать. Проблемы в данных не найдено, поэтому 
 -- ничего не исключается.
 
+-- 5) Нетипичные значения
+-- какие значения вообще встречаются в категориальных полях
+SELECT 'calls.caller_role' AS field, 
+	   caller_role AS value, 
+	   COUNT(*) AS cnt
+  FROM calls
+ GROUP BY caller_role
+ 
+UNION ALL
+
+SELECT 'calls.status', 
+	   status, 
+	   COUNT(*)
+  FROM calls
+ GROUP BY status
+ 
+UNION ALL
+
+SELECT 'calls.call_tags', 
+	   tag, 
+	   COUNT(*)
+  FROM calls
+       CROSS JOIN UNNEST(call_tags) AS tag
+ GROUP BY tag
+ 
+UNION ALL
+
+SELECT 'messages.sender_role', 
+	   sender_role, 
+	   COUNT(*)
+  FROM messages
+ GROUP BY sender_role
+ 
+UNION ALL
+
+SELECT 'messages.channel', 
+	   COALESCE(message_meta ->> 'channel', '<нет ключа>'), 
+	   COUNT(*)
+  FROM messages
+ GROUP BY COALESCE(message_meta ->> 'channel', '<нет ключа>')
+ 
+UNION ALL
+
+SELECT 'messages.is_read', 
+	   COALESCE(message_meta ->> 'is_read', '<нет ключа>'), 
+	   COUNT(*)
+  FROM messages
+ GROUP BY COALESCE(message_meta ->> 'is_read', '<нет ключа>')
+ ORDER BY field, cnt DESC;
+
+-- Комментарий: посторонних значений нет. Роли — только employer/applicant, статусы —
+-- successful/unsuccessful/error, в тегах 10 ожидаемых, у сообщения
+-- есть channel (web/mobile_app) и is_read (true/false). Единственный редкий
+-- статус error (1 звонок) — допустимое значение. Нетипичные значения в этих полях
+-- не затрагивают сам факт коммуникации, а касаются только отдельных атрибутов. 
+-- Они остаются в слое и при необходимости исключаются только из расчёта
+-- соответствующего показателя
+
 -- исследование call_duration
 WITH p AS (
   SELECT PERCENTILE_CONT(0.99) WITHIN GROUP (ORDER BY call_duration) AS p99
     FROM calls
    WHERE status = 'successful'
 )
-SELECT AVG(c.call_duration) AS avg_with_outliers,
+SELECT ROUND(AVG(c.call_duration), 1) AS avg_with_outliers,
 	   PERCENTILE_CONT(0.5)  WITHIN GROUP (ORDER BY call_duration) AS p50_sec,
 	   PERCENTILE_CONT(0.99) WITHIN GROUP (ORDER BY call_duration) AS p99,
 	   COUNT(*) FILTER (WHERE c.call_duration >  p.p99) AS cnt_above_p99,
-	   AVG(c.call_duration) FILTER (WHERE c.call_duration <= p.p99) AS avg_without_outliers
+	   ROUND(AVG(c.call_duration) FILTER (WHERE c.call_duration <= p.p99), 1) AS avg_without_outliers
   FROM calls c
  CROSS JOIN p
  WHERE status = 'successful';
 
 
 -- Вывод: 
--- Был проведен анализ качества данных. Из предложенных проверок проверка проблемы 2 (связь коммуникации с откликом) 
--- показала, что целесообразно сключить из слоя коммуникаций: calls — 8 строк.
+-- Был проведен анализ качества данных. Единственная выявленная проблема, затрагивающая 
+-- сам факт коммуникации, — 8 звонков без response_id, исключаем их из слоя коммуникаций. Пропусков,
+-- расхождений идентификаторов, событий раньше отклика и противоречий внутри строки
+-- не найдено.
 
--- После удаления 2 значений, больших p99, среднее сместилось ненамного. 
+-- Длительность успешных звонков: После удаления 2 значений, больших p99, среднее сместилось ненамного. 
 -- К тому же, для всей выборки медиана и среднее отличаются примерно на 6%. 
 -- Это не такой критичный разрыв, как если бы были реально нетипичные значения.
--- Думаю, это допустимые значения, а не ошибки. Можно оставить их при расчёте 
--- типичной длительности звонка.
+-- Думаю, это допустимые значения, а не ошибки, от p99 они отличаются меньше
+-- чем на 10 секунд. Можно оставить их при расчёте типичной длительности звонка.
 
 -- ============================================================
--- БЛОК Б. Качество и подготовка данных
+-- БЛОК Б. История коммуникаций
 -- ============================================================
 
 -- ЗАДАНИЕ 2. 
--- как я поняла, нужны события, инициированные работодателем
+-- нужны события, инициированные работодателем
 
 WITH valid_calls AS (
-  SELECT r.response_id,
+  SELECT c.response_id,
          c.employer_id,
-         c.call_id   AS event_id,
-         c.call_at   AS event_at,
-         'call'      AS event_type
+         c.call_id AS event_id,
+         c.call_at AS event_at,
+         'call' AS event_type
     FROM calls c
          JOIN responses r 
 		 ON r.response_id = c.response_id
@@ -220,7 +277,7 @@ WITH valid_calls AS (
 ),
 
 valid_messages AS (
-  SELECT r.response_id,
+  SELECT m.response_id,
          m.employer_id,
          m.message_id AS event_id,
          m.sent_at AS event_at,
@@ -228,8 +285,6 @@ valid_messages AS (
     FROM messages m
     	 JOIN responses r 
 		 ON r.response_id = m.response_id
-    	 JOIN vacancies v 
-		 ON v.vacancy_id  = r.vacancy_id
    WHERE m.sender_role = 'employer'
      AND m.sent_at < r.created_at + INTERVAL '7 days'
 ),
@@ -255,16 +310,100 @@ SELECT COUNT(*) AS total_cnt,
 	   COUNT(*) FILTER (WHERE event_type = 'call') AS call_cnt
   FROM events;
 
--- Вывод: 
+-- Комментарийй: 
 -- общее количество событий: 1096
 -- количество различных откликов с коммуникацией: 382
 -- количество звонков: 108
 -- количество сообщений: 988
 
+-- Вывод: за первые 7 дней работодатели связались с кандидатами по более половины откликам 
+-- (382 откликам из 628 (около 61%)).
+-- Основной канал — сообщения: 988 событий (около 90%) против 108 звонков (около 10%), то есть
+-- работодатели предпочитают переписку, а звонок служит дополнительным инструментом.
+
 -- ЗАДАНИЕ 3. Таймлайн коммуникаций и витрина отклика
 
 WITH valid_calls AS (
-  SELECT r.response_id,
+  SELECT c.response_id,
+         c.employer_id,
+         c.call_id AS event_id,
+         c.call_at AS event_at,
+         'call' AS event_type
+    FROM calls c
+         JOIN responses r 
+		 ON r.response_id = c.response_id
+   WHERE c.caller_role = 'employer'
+   	 AND c.call_at < r.created_at + INTERVAL '7 days'
+),
+
+valid_messages AS (
+  SELECT m.response_id,
+         m.employer_id,
+         m.message_id AS event_id,
+         m.sent_at AS event_at,
+         'message' AS event_type
+    FROM messages m
+    	 JOIN responses r 
+		 ON r.response_id = m.response_id
+   WHERE m.sender_role = 'employer'
+     AND m.sent_at < r.created_at + INTERVAL '7 days'
+),
+
+events AS (
+  SELECT * FROM valid_calls
+  UNION ALL
+  SELECT * FROM valid_messages
+),
+
+timeline AS (
+  SELECT response_id,
+         employer_id,
+         event_id,
+         event_at,
+         event_type,
+		 ROW_NUMBER() OVER w AS event_num,
+         LAG(event_at) OVER w AS prev_event_at,
+         LEAD(event_type) OVER w AS next_event_type,
+         COUNT(*) OVER (w ROWS BETWEEN UNBOUNDED PRECEDING
+                                   AND CURRENT ROW) AS event_cnt_to_current,
+         FIRST_VALUE(event_type) OVER w AS first_event_type,
+         LAST_VALUE(event_type) OVER (w ROWS BETWEEN UNBOUNDED PRECEDING
+                                                 AND UNBOUNDED FOLLOWING) AS last_event_type
+    FROM events
+   WINDOW w AS (
+    PARTITION BY response_id
+    ORDER BY event_at, event_type, event_id
+   )
+   ORDER BY response_id, event_at, event_type, event_id
+)
+
+-- проверка количества коммуникаций для шага 2
+-- SELECT event_type AS first_comm_type,
+--        COUNT(DISTINCT response_id) AS response_cnt
+--   FROM timeline
+--  WHERE event_num = 1
+--  GROUP BY event_type
+--  ORDER BY event_type;
+
+
+SELECT response_id,
+	   employer_id,
+	   event_id,
+       event_at,
+       event_type,
+	   event_num,
+	   prev_event_at,
+	   next_event_type,
+	   event_cnt_to_current,
+	   first_event_type,
+	   last_event_type
+  FROM timeline;
+
+
+-- шаг 2
+
+WITH valid_calls AS (
+  SELECT c.response_id,
          c.employer_id,
          c.call_id   AS event_id,
          c.call_at   AS event_at,
@@ -277,7 +416,7 @@ WITH valid_calls AS (
 ),
 
 valid_messages AS (
-  SELECT r.response_id,
+  SELECT m.response_id,
          m.employer_id,
          m.message_id AS event_id,
          m.sent_at    AS event_at,
@@ -285,8 +424,6 @@ valid_messages AS (
     FROM messages m
     	 JOIN responses r 
 		 ON r.response_id = m.response_id
-    	 JOIN vacancies v 
-		 ON v.vacancy_id  = r.vacancy_id
    WHERE m.sender_role = 'employer'
      AND m.sent_at < r.created_at + INTERVAL '7 days'
 ),
@@ -302,53 +439,107 @@ timeline AS (
          employer_id,
          event_id,
          event_at,
-         event_type	 
-    FROM events
-   ORDER BY response_id, event_at, event_id
-),
-
-timeline_with_layers AS (
-  SELECT *,
-         ROW_NUMBER() OVER w AS event_num,
+         event_type,
+		 ROW_NUMBER() OVER w AS event_num,
          LAG(event_at) OVER w AS prev_event_at,
          LEAD(event_type) OVER w AS next_event_type,
          COUNT(*) OVER (w ROWS BETWEEN UNBOUNDED PRECEDING
-                                   AND CURRENT ROW) AS comm_cnt_to_date,
+                                   AND CURRENT ROW) AS event_cnt_to_current,
          FIRST_VALUE(event_type) OVER w AS first_event_type,
          LAST_VALUE(event_type) OVER (w ROWS BETWEEN UNBOUNDED PRECEDING
-                                               AND UNBOUNDED FOLLOWING) AS last_event_type
-  FROM timeline
- WINDOW w AS (
+                                                 AND UNBOUNDED FOLLOWING) AS last_event_type
+    FROM events
+   WINDOW w AS (
     PARTITION BY response_id
-    ORDER BY event_type, event_id
-  )
+    ORDER BY event_at, event_type, event_id
+   )
+   ORDER BY response_id, event_at, event_type, event_id
+),
 
-SELECT *
-  FROM timeline_with_layers;
+gaps AS (
+  SELECT response_id,
+         event_id,
+         ROUND(
+           (DATE_PART('epoch', event_at - prev_event_at) / 3600)::NUMERIC, 2) AS time_from_previous
+    FROM timeline
+),
+
+response_mart AS (
+	SELECT r.response_id,
+	       v.employer_id,
+	       v.professional_role,
+	       r.status AS response_status,
+	       COUNT(t.event_id) AS comm_cnt,
+	       COUNT(t.event_id) FILTER (WHERE t.event_type = 'call') AS call_cnt,
+	       COUNT(t.event_id) FILTER (WHERE t.event_type = 'message') AS msg_cnt,
+	       MIN(t.event_at) AS first_comm_at,
+	       MIN(t.event_type) FILTER (WHERE t.event_num = 1) AS first_comm_type,
+	       MIN(t.event_type) FILTER (WHERE t.event_num = 2) AS second_comm_type,
+	       MAX(t.last_event_type) AS last_comm_type,
+	       ROUND(
+	           (DATE_PART('epoch', MIN(t.event_at) - r.created_at) / 3600)::NUMERIC,
+	           2
+	         ) AS hours_to_first_comm, 
+		   MAX(g.time_from_previous) AS max_gap_hours
+	  FROM responses r
+	  	   JOIN vacancies v  
+			 ON v.vacancy_id = r.vacancy_id
+	  	   LEFT JOIN timeline t 
+			      ON t.response_id = r.response_id
+	 	   LEFT JOIN gaps g     
+				  ON g.response_id = t.response_id
+	              AND g.event_id = t.event_id
+	 GROUP BY r.response_id, v.employer_id, v.professional_role, r.status, r.created_at
+)
+
+SELECT COUNT(*) AS total_rows,
+       COUNT(*) FILTER (WHERE comm_cnt > 0) AS with_comm,
+       COUNT(*) FILTER (WHERE comm_cnt = 0) AS without_comm,
+       COUNT(*) FILTER (WHERE first_comm_type = 'message') AS first_msg,
+       COUNT(*) FILTER (WHERE first_comm_type = 'call') AS first_call
+  FROM response_mart;
+
+-- Комментарий:
+-- количество строк: 628;
+-- количество откликов с коммуникацией: 382;
+-- количество откликов без коммуникации: 246;
+-- количество откликов, где первой коммуникацией было сообщение: 314;
+-- количество откликов, где первой коммуникацией был звонок: 68
+
+-- Вывод: 246 откликов из 628 (около 39%) остались без реакции работодателя в первую неделю,
+-- и это заметная доля кандидатов без обратной связи. Если работодатель выходит на связь,
+-- то в 82% случаев (314 из 382) он начинает с сообщения и лишь в 18% (68) — со звонка:
+-- первый контакт почти всегда письменный.
 
 
--- шаг 2
+-- ============================================================
+-- БЛОК В. Сравнение работодателей
+-- ============================================================
+
+-- ЗАДАНИЕ 4
+
 WITH valid_calls AS (
-  SELECT r.response_id,
+  SELECT c.response_id,
          c.employer_id,
          c.call_id   AS event_id,
          c.call_at   AS event_at,
          'call'      AS event_type
     FROM calls c
-    JOIN responses r ON r.response_id = c.response_id
+    	 JOIN responses r 
+		 ON r.response_id = c.response_id
    WHERE c.caller_role = 'employer'
    	 AND c.call_at < r.created_at + INTERVAL '7 days'
 ),
 
 valid_messages AS (
-  SELECT r.response_id,
+  SELECT m.response_id,
          m.employer_id,
          m.message_id AS event_id,
          m.sent_at    AS event_at,
          'message'    AS event_type
     FROM messages m
-    JOIN responses r ON r.response_id = m.response_id
-    JOIN vacancies v ON v.vacancy_id  = r.vacancy_id
+    	 JOIN responses r 
+		 ON r.response_id = m.response_id
    WHERE m.sender_role = 'employer'
      AND m.sent_at < r.created_at + INTERVAL '7 days'
 ),
@@ -364,84 +555,72 @@ timeline AS (
          employer_id,
          event_id,
          event_at,
-         event_type	 
-    FROM events
-   ORDER BY response_id, event_at, event_id
-),
-
-timeline_with_layers AS (
-  SELECT *,
-         ROW_NUMBER() OVER w AS event_num,
+         event_type,
+		 ROW_NUMBER() OVER w AS event_num,
          LAG(event_at) OVER w AS prev_event_at,
          LEAD(event_type) OVER w AS next_event_type,
          COUNT(*) OVER (w ROWS BETWEEN UNBOUNDED PRECEDING
-                                   AND CURRENT ROW) AS comm_cnt_to_date,
+                                   AND CURRENT ROW) AS event_cnt_to_current,
          FIRST_VALUE(event_type) OVER w AS first_event_type,
          LAST_VALUE(event_type) OVER (w ROWS BETWEEN UNBOUNDED PRECEDING
-                                               AND UNBOUNDED FOLLOWING) AS last_event_type
-  FROM timeline
- WINDOW w AS (
+                                                 AND UNBOUNDED FOLLOWING) AS last_event_type
+    FROM events
+   WINDOW w AS (
     PARTITION BY response_id
-    ORDER BY event_type, event_id
-  )
+    ORDER BY event_at, event_type, event_id
+   )
+   ORDER BY response_id, event_at, event_type, event_id
+),
 
-response_comm AS (
+gaps AS (
   SELECT response_id,
-         COUNT(*) AS comm_cnt,
-         COUNT(*) FILTER (WHERE event_type = 'call') AS call_cnt,
-         COUNT(*) FILTER (WHERE event_type = 'message') AS msg_cnt,
-         MIN(event_at) AS first_comm_at,
-         MAX(event_type) FILTER (WHERE event_num = 1) AS first_comm_type,
-         MAX(event_type) FILTER (WHERE event_num = 2) AS second_comm_type,
-         MAX(last_event_type) AS last_comm_type,
-         MAX(EXTRACT(EPOCH FROM event_at - prev_event_at)) / 3600
-                                                        AS max_gap_hours
-    FROM timeline_with_layers
-   GROUP BY response_id
+         event_id,
+         ROUND(
+           (DATE_PART('epoch', event_at - prev_event_at) / 3600)::NUMERIC,
+           2
+         ) AS time_from_previous
+    FROM timeline
 ),
 
 response_mart AS (
-  SELECT r.response_id,
-         v.employer_id,
-         v.professional_role,
-         r.status                          AS response_status,
-         COALESCE(rc.comm_cnt, 0)          AS comm_cnt,
-         COALESCE(rc.call_cnt, 0)          AS call_cnt,
-         COALESCE(rc.msg_cnt, 0)           AS msg_cnt,
-         rc.first_comm_at,
-         rc.first_comm_type,
-         rc.second_comm_type,
-         rc.last_comm_type,
-         EXTRACT(EPOCH FROM rc.first_comm_at - r.created_at) / 3600
-                                           AS hours_to_first_comm,
-         rc.max_gap_hours
-    FROM responses r
-    LEFT JOIN vacancies v ON v.vacancy_id   = r.vacancy_id
-    LEFT JOIN response_comm rc ON rc.response_id = r.response_id
-)
-
-SELECT COUNT(*)                                             AS total_rows,
-       COUNT(*) FILTER (WHERE comm_cnt > 0)                 AS with_comm,
-       COUNT(*) FILTER (WHERE comm_cnt = 0)                 AS without_comm,
-       COUNT(*) FILTER (WHERE first_comm_type = 'message')  AS first_msg,
-       COUNT(*) FILTER (WHERE first_comm_type = 'call')     AS first_call
-  FROM response_mart;
-
-
- -- 4
- WITH
-  -- ... все CTE из заданий 2-3 до response_mart включительно ...
-  response_mart AS (...),
+	SELECT r.response_id,
+	       v.employer_id,
+	       v.professional_role,
+	       r.status AS response_status,
+	       COUNT(t.event_id) AS comm_cnt,
+	       COUNT(t.event_id) FILTER (WHERE t.event_type = 'call') AS call_cnt,
+	       COUNT(t.event_id) FILTER (WHERE t.event_type = 'message') AS msg_cnt,
+	       MIN(t.event_at) AS first_comm_at,
+	       MIN(t.event_type) FILTER (WHERE t.event_num = 1) AS first_comm_type,
+	       MIN(t.event_type) FILTER (WHERE t.event_num = 2) AS second_comm_type,
+	       MAX(t.last_event_type) AS last_comm_type,
+	       ROUND(
+	           (DATE_PART('epoch', MIN(t.event_at) - r.created_at) / 3600)::NUMERIC,
+	           2
+	         ) AS hours_to_first_comm, 
+		   MAX(g.time_from_previous) AS max_gap_hours
+	  FROM responses r
+	  	   JOIN vacancies v  
+			 ON v.vacancy_id = r.vacancy_id
+	  	   LEFT JOIN timeline t 
+			      ON t.response_id = r.response_id
+	 	   LEFT JOIN gaps g     
+				  ON g.response_id = t.response_id
+	              AND g.event_id = t.event_id
+	 GROUP BY r.response_id, v.employer_id, v.professional_role, r.status, r.created_at
+),
 
 employer_stats AS (
   SELECT professional_role,
          employer_id,
-         COUNT(*)                                                  AS resp_cnt,
-         COUNT(*) FILTER (WHERE comm_cnt > 0)                      AS processed_cnt,
-         100.0 * COUNT(*) FILTER (WHERE comm_cnt > 0) / COUNT(*)   AS processed_pct,
+         COUNT(*) AS resp_cnt,
+         COUNT(*) FILTER (WHERE comm_cnt > 0) AS processed_cnt,
+         100.0 * COUNT(*) FILTER (WHERE comm_cnt > 0) 
+		 	   / NULLIF(COUNT(*), 0) AS processed_pct,
          PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY hours_to_first_comm) AS median_hours,
          PERCENTILE_CONT(0.9) WITHIN GROUP (ORDER BY hours_to_first_comm) AS p90_hours,
-         100.0 * COUNT(*) FILTER (WHERE response_status = 'invited') / COUNT(*) AS invite_pct
+         100.0 * COUNT(*) FILTER (WHERE response_status = 'invited') 
+		 	   / NULLIF(COUNT(*), 0) AS conversion_pct
     FROM response_mart
    GROUP BY professional_role, employer_id
   HAVING COUNT(*) >= 8
@@ -457,14 +636,209 @@ ranked AS (
 )
 
 SELECT professional_role,
+	   employer_id,
        place,
-       employer_id,
        resp_cnt,
        processed_cnt,
-       ROUND(processed_pct, 1)          AS processed_pct,
-       ROUND(median_hours::NUMERIC, 1)  AS median_hours,
-       ROUND(p90_hours::NUMERIC, 1)     AS p90_hours,
-       ROUND(invite_pct, 1)             AS invite_pct
+       ROUND(processed_pct, 1) AS processed_pct,
+       ROUND(median_hours::NUMERIC, 2) AS median_hours,
+       ROUND(p90_hours::NUMERIC, 2) AS p90_hours,
+       ROUND(conversion_pct, 1) AS conversion_pct
   FROM ranked
  WHERE place <= 2
  ORDER BY professional_role, place, employer_id;
+
+-- Комментарий:
+-- "Аналитик данных"		1	109
+-- "Аналитик данных"		2	103
+-- "Дата-инженер"			1	106
+-- "Дата-инженер"			2	101
+-- "Продуктовый аналитик"	1	103
+-- "Продуктовый аналитик"	2	102
+-- "Разработчик"			1	112
+-- "Разработчик"			2	104
+-- "Тестировщик"			1	107
+-- "Тестировщик"			2	108
+
+-- Вывод: у лидеров направлений доля обработанных откликов — от 70,0% до 89,5%, 
+-- а разрыв со 2-м местом бывает большим (Дата-инженер: 70,0% против 45,8%). 
+-- Высокая доля обработки не гарантирует приглашений:
+-- у 103 в аналитике данных обработано 84,8% откликов, но конверсия лишь 10,1%,
+-- тогда как у лидеров тестировщиках она 41,2% (107) и 37,5% (108). При этом у части
+-- лидеров мало откликов (108 — 8, 106 — 10), так что их места неустойчивы.
+
+-- ЗАДАНИЕ 5
+
+WITH valid_messages AS (
+  SELECT r.response_id,
+         m.employer_id,
+         m.message_id,
+         m.sent_at,
+         m.sender_role
+    FROM messages m
+    JOIN responses r ON r.response_id = m.response_id
+   WHERE m.sent_at < r.created_at + INTERVAL '7 days'
+),
+
+messages_with_prev AS (
+  SELECT response_id,
+         employer_id,
+         message_id,
+         sent_at,
+         sender_role,
+         LAG(sender_role) OVER w AS prev_sender_role,
+         LAG(sent_at) OVER w AS prev_sent_at
+    FROM valid_messages
+  WINDOW w AS (
+    PARTITION BY response_id
+    ORDER BY sent_at, message_id
+   )
+),
+
+employer_replies AS (
+  SELECT employer_id,
+         message_id,
+		 DATE_PART('epoch', sent_at - prev_sent_at) / 3600 AS reply_hours
+    FROM messages_with_prev
+   WHERE sender_role = 'employer'
+     AND prev_sender_role = 'applicant'
+)
+
+-- общее кол-во таких ответов
+-- SELECT COUNT(message_id)
+--   FROM employer_replies;
+
+SELECT employer_id,
+       COUNT(*) AS reply_cnt,
+       ROUND(AVG(reply_hours)::NUMERIC, 2) AS avg_hours,
+       ROUND((PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY reply_hours))::NUMERIC, 2) AS median_hours,
+       ROUND((PERCENTILE_CONT(0.9) WITHIN GROUP (ORDER BY reply_hours))::NUMERIC, 2) AS p90_hours
+  FROM employer_replies
+ GROUP BY employer_id
+ ORDER BY median_hours, employer_id;
+
+
+-- Комментарий:
+-- общее количество найденных ответов: 749
+-- employer_id работодателя с минимальной медианой: 107
+-- значение его медианы: 3,93
+
+-- Вывод:
+-- У части работодателей ответов мало (105 - 6, 108 - 8), поэтому
+-- их метрики неустойчивы, и поэтому выводы осторожные.
+-- По медиане работодатели почти не различаются: все лежат в диапазоне 3,9–4,9 ч.
+-- По p90 тоже близки (у всех 13–20 ч, то есть каждый десятый кандидат ждёт почти сутки).
+-- Величина разрыва между средним и медианой и p90 вместе показывают, насколько
+-- стабильно по времени работодатель отвечает. От работодателя, у которого оба показателя малы,
+-- время ожидания ответа предсказуемее. Можно сказать, что по показателям 109 стабильнее всего
+-- (у 105 очень мало сообщений), самый непредсказуемым выглядит 107. При этом стабильность и скорость —
+-- разные вещи: 107 нестабильный, но его медианный ответ самый быстрый (3,93 ч),
+-- а 109 ровный, но по медиане (4,42 ч) не лучший. То есть 109 отвечает предсказуемо,
+-- а 107 либо очень быстро, либо с большой задержкой.
+
+-- ============================================================
+-- БЛОК Г. Сложные типы данных
+-- ============================================================
+
+-- ЗАДАНИЕ 6.1
+
+WITH valid_calls AS (
+  SELECT c.call_id,
+         c.status,
+         c.call_tags
+    FROM calls c
+    JOIN responses r ON r.response_id = c.response_id
+   WHERE c.caller_role  = 'employer'
+     AND c.call_at < r.created_at + INTERVAL '7 days'
+),
+
+-- нужный технический тег один, остальных нет
+checked_calls AS (
+  SELECT call_id,
+         call_tags,
+         CASE status
+           WHEN 'successful' THEN 'connected'= ANY(call_tags)
+                             AND NOT call_tags && ARRAY['no_answer', 'technical_error'] 
+           WHEN 'unsuccessful' THEN 'no_answer' = ANY(call_tags)
+                               AND NOT call_tags && ARRAY['connected', 'technical_error']
+           WHEN 'error' THEN 'technical_error' = ANY(call_tags)
+                        AND NOT call_tags && ARRAY['connected', 'no_answer']
+           ELSE FALSE
+         END AS is_consistent
+    FROM valid_calls
+)
+
+SELECT COUNT(*) FILTER (WHERE is_consistent AND 'screening' = ANY(call_tags)) AS screening_cnt,
+       COUNT(*) FILTER (WHERE is_consistent AND 'interview' = ANY(call_tags)) AS interview_cnt,
+       COUNT(*) FILTER (WHERE is_consistent AND 'follow_up' = ANY(call_tags)) AS follow_up_cnt,
+       COUNT(*) FILTER (WHERE is_consistent AND 'details' = ANY(call_tags)) AS details_cnt,
+       COUNT(*) FILTER (WHERE is_consistent
+                          AND call_tags && ARRAY['screening', 'interview', 'follow_up', 'details'])
+                                                                              AS with_business_tag_cnt,
+       ROUND(AVG(CARDINALITY(call_tags)) FILTER (WHERE is_consistent), 2) AS avg_tags_per_call
+  FROM checked_calls;
+
+-- Комментарий: 
+-- тег screening: 25
+-- тег interview: 31
+-- тег follow_up: 29
+-- тег details: 23
+-- количество валидных звонков, содержащих хотя бы один из перечисленных бизнес-тегов: 108
+-- среднее количество тегов на один валидный звонок: 4
+
+-- Вывод: все 108 звонков работодателя за первые 7 дней прошли проверку согласованности
+-- статуса и технических тегов, исключать ничего не пришлось. У каждого звонка ровно
+-- один бизнес-тег (в сумме 108). Они распределены почти в равных долях.
+-- То есть звонок используют на всех этапах отбора, а не только для первичного скрининга. Для интервью
+-- звонок импользуют несколько больше, реже для согласования деталей.
+
+-- ЗАДАНИЕ 6.2
+
+WITH valid_messages AS (
+  SELECT m.message_id,
+         m.message_meta ->> 'channel' AS channel,
+         (m.message_meta ->> 'is_read')::BOOLEAN AS is_read,
+         CASE WHEN JSONB_TYPEOF(m.message_meta -> 'attachments') = 'array'
+              THEN JSONB_ARRAY_LENGTH(m.message_meta -> 'attachments')
+         END AS attachments_cnt
+    FROM messages m
+    	 JOIN responses r 
+		 ON r.response_id = m.response_id
+   WHERE m.sender_role = 'employer'
+     AND m.sent_at < r.created_at + INTERVAL '7 days'
+)
+
+SELECT COALESCE(channel, 'channel_missing') AS channel,
+       COUNT(*) AS msg_cnt,
+       COUNT(is_read) AS read_known_cnt,
+       COUNT(*) FILTER (WHERE NOT is_read) AS unread_cnt,
+       ROUND(100.0 * COUNT(*) FILTER (WHERE NOT is_read)
+                   / NULLIF(COUNT(is_read), 0), 2) AS unread_pct,
+       COUNT(*) FILTER (WHERE attachments_cnt > 0) AS with_attachment_cnt,
+       ROUND(100.0 * COUNT(*) FILTER (WHERE attachments_cnt > 0) / COUNT(*), 2) AS with_attachment_pct
+  FROM valid_messages
+ GROUP BY COALESCE(channel, 'channel_missing')
+ ORDER BY msg_cnt DESC, channel;
+
+-- Комментарий:
+													 -- web		mobile_app
+-- количество сообщений									628		360
+-- ..., где признак прочтения присутствует				628		360
+-- количество непрочитанных сообщений					52		36
+-- долю непрочитанных, где признак прочтения известен	8,28	10
+-- количество сообщений хотя бы с одним вложением		25		14
+-- долю сообщений с вложением							3,98	3,89
+
+-- Вывод: работодатели пишут в основном через веб (около 64% сообщений),
+-- сообщений без канала нет. В мобильном приложении доля непрочитанных выше — 10,0%
+-- против 8,28% в вебе, но разница не сильно большая, поэтому рано сравнивать каналы по этому признаку.
+-- Вложения редки и от канала не зависят (около 4% в обоих), коммуникация почти полностью текстовая.
+
+-- ============================================================
+-- БЛОК Д. Самостоятельное исследование
+-- ============================================================
+
+-- ЗАДАНИЕ 7
+-- Команда продукта хочет понять, отличаются ли коммуникации по откликам, которые заканчиваются
+-- приглашением, от коммуникаций по остальным откликам — и если отличаются, то чем именно.
+
