@@ -842,3 +842,387 @@ SELECT COALESCE(channel, 'channel_missing') AS channel,
 -- Команда продукта хочет понять, отличаются ли коммуникации по откликам, которые заканчиваются
 -- приглашением, от коммуникаций по остальным откликам — и если отличаются, то чем именно.
 
+-- Гипотеза 1 ( ˘▽˘)っ: приглашение чаще там, где коммуникацию начал работодатель
+-- окно - все время 
+-- используем слой событий работодателя (задание 2) и витрину отклика response_mart (задание 3)
+WITH valid_calls AS (
+  SELECT c.response_id,
+         c.employer_id,
+         c.call_id AS event_id,
+         c.call_at AS event_at,
+         'call' AS event_type,
+		 c.caller_role AS initiator
+    FROM calls c
+         JOIN responses r
+         ON r.response_id = c.response_id
+   WHERE c.caller_role = 'employer'
+),
+
+valid_messages AS (
+  SELECT m.response_id,
+         m.employer_id,
+         m.message_id AS event_id,
+         m.sent_at AS event_at,
+         'message' AS event_type,
+		 m.sender_role AS initiator
+    FROM messages m
+         JOIN responses r
+         ON r.response_id = m.response_id
+   WHERE m.sender_role = 'employer'
+),
+
+employer_events AS (
+  SELECT * FROM valid_calls
+  UNION ALL
+  SELECT * FROM valid_messages
+),
+
+timeline AS (
+  SELECT response_id,
+         employer_id,
+         event_id,
+         event_at,
+         event_type,
+         ROW_NUMBER() OVER w AS event_num,
+         LAG(event_at) OVER w AS prev_event_at,
+         LAST_VALUE(event_type) OVER (w ROWS BETWEEN UNBOUNDED PRECEDING
+                                                 AND UNBOUNDED FOLLOWING) AS last_event_type
+    FROM employer_events
+  WINDOW w AS (
+    PARTITION BY response_id
+    ORDER BY event_at, event_type, event_id
+  )
+),
+
+gaps AS (
+  SELECT response_id,
+         event_id,
+         ROUND((DATE_PART('epoch', event_at - prev_event_at) / 3600)::NUMERIC, 2) AS time_from_previous
+    FROM timeline
+),
+
+response_mart AS (
+  SELECT r.response_id,
+         v.employer_id,
+         v.professional_role,
+         r.status AS response_status,
+         COUNT(t.event_id) AS comm_cnt,
+         COUNT(t.event_id) FILTER (WHERE t.event_type = 'call') AS call_cnt,
+         COUNT(t.event_id) FILTER (WHERE t.event_type = 'message') AS msg_cnt,
+         MIN(t.event_at) AS first_comm_at,
+         MIN(t.event_type) FILTER (WHERE t.event_num = 1) AS first_comm_type,
+         ROUND((DATE_PART('epoch', MIN(t.event_at) - r.created_at) / 3600)::NUMERIC, 2) AS hours_to_first_comm,
+         MAX(g.time_from_previous) AS max_gap_hours
+    FROM responses r
+         JOIN vacancies v
+         ON v.vacancy_id = r.vacancy_id
+         LEFT JOIN timeline t
+         ON t.response_id = r.response_id
+         LEFT JOIN gaps g
+         ON g.response_id = t.response_id
+         AND g.event_id = t.event_id
+   GROUP BY r.response_id, v.employer_id, v.professional_role, r.status, r.created_at
+),
+
+applicant_events AS (
+  SELECT c.response_id,
+         c.call_id AS event_id,
+         c.call_at AS event_at,
+         'call' AS event_type,
+		 c.caller_role AS initiator
+    FROM calls c
+         JOIN responses r
+         ON r.response_id = c.response_id
+   WHERE c.caller_role = 'applicant'
+  UNION ALL
+  SELECT m.response_id,
+         m.message_id,
+         m.sent_at,
+         'message',
+		 m.sender_role
+    FROM messages m
+         JOIN responses r
+         ON r.response_id = m.response_id
+   WHERE m.sender_role = 'applicant'
+),
+
+
+all_events AS (
+  SELECT response_id, event_id, event_at, event_type, initiator
+    FROM employer_events
+  UNION ALL
+  SELECT response_id, event_id, event_at, event_type, initiator
+    FROM applicant_events
+),
+
+-- к отклику добавим, кто начал разговор и каким каналом
+first_event AS (
+  SELECT response_id,
+         initiator,
+         event_type AS channel
+    FROM (
+      SELECT response_id,
+             initiator,
+             event_type,
+             ROW_NUMBER() OVER (PARTITION BY response_id
+                                ORDER BY event_at, event_type, event_id) AS row_num
+        FROM all_events
+    ) ae
+   WHERE row_num = 1
+),
+
+mart_with_initiator AS (
+  SELECT rm.*,
+         fe.initiator,
+         fe.channel
+    FROM response_mart rm
+         LEFT JOIN first_event fe
+         ON fe.response_id = rm.response_id
+)
+
+SELECT initiator AS group_name,
+       COUNT(*) AS response_cnt,
+       ROUND(100.0 * COUNT(*) FILTER (WHERE response_status = 'invited') / COUNT(*), 1) AS conversion_pct,
+       ROUND((PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY hours_to_first_comm))::NUMERIC, 2) AS median_hours_to_first_comm,
+       ROUND(AVG(comm_cnt), 2) AS avg_comm_cnt,
+       ROUND(100.0 * COUNT(*) FILTER (WHERE call_cnt > 0) / COUNT(*), 1) AS with_call_pct,
+       ROUND((PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY max_gap_hours))::NUMERIC, 2) AS median_max_gap_hours
+  FROM mart_with_initiator
+ GROUP BY initiator_label
+ ORDER BY initiator_label DESC;
+
+SELECT initiator,
+       channel,
+       COUNT(*) AS response_cnt,
+       ROUND(100.0 * COUNT(*) FILTER (WHERE response_status = 'invited') / COUNT(*), 1) AS conversion_pct,
+       ROUND((PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY hours_to_first_comm))::NUMERIC, 2) AS median_hours_to_first_comm,
+       ROUND(AVG(comm_cnt), 2) AS avg_comm_cnt,
+       ROUND(100.0 * COUNT(*) FILTER (WHERE call_cnt > 0) / COUNT(*), 1) AS with_call_pct,
+       ROUND((PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY max_gap_hours))::NUMERIC, 2) AS median_max_gap_hours
+  FROM mart_with_initiator
+ WHERE channel IS NOT NULL
+ GROUP BY initiator, channel
+ ORDER BY initiator DESC, channel;
+
+
+-- Комментарий:
+
+-- Отклики делим по тому, кто начал разговор. Также выведем конверсию для откликов без коммуникации. Для контроля
+-- те же группы делим по каналу первого контакта.
+--
+-- Метрики описывают, чем ещё различается коммуникация работодателя в группах,
+-- и помогают понять, не объясняется ли разница в конверсии чем-то другим:
+-- median_hours_to_first_comm — скорость: медиана часов от отклика до первого события
+-- работодателя;
+-- avg_comm_cnt — среднее число звонков и сообщений работодателя на отклик;
+-- with_call_pct — доля откликов, где работодатель хотя бы раз позвонил;
+-- median_max_gap_hours — медиана самой длинной паузы между коммуникациями работодателя.
+
+-- Гипотеза подтверждается, если:
+-- 1) конверсия в группе "начал работодатель" выше, чем в группе "начал кандидат";
+-- 2) разница сохраняется в обоих каналах первого контакта (то есть не объясняется каналом);
+-- 3) в каждой сравниваемой группе не меньше 30 откликов.
+
+
+-- 		                           откликов  invited  до 1-го контакта  ср. число   со звонком  макс. пауза
+--                                                     раб-ля (медиана)  коммуник.               (медиана)
+-- работодатель               354       16,4%    76,25 ч           3,26        36,4%       25,12 ч
+-- кандидат                   148       10,8%    80,03 ч           2,94        12,8%       25,50 ч
+-- без коммуникаций           126       14,3%    —                 0           0%          —
+ --                     канал
+-- работодатель 	 сообщением  275       15,3%    79,17 ч           3,19        18,2%       24,33 ч
+-- работодатель  	звонком     79        20,3%    57,50 ч           3,52        100%        93,13 ч
+-- кандидат   		сообщением  116       9,5%     58,42 ч           3,16        14,7%       25,70 ч
+-- кандидат			 звонком      32        15,6%    147,67 ч          2,13        6,3%        24,82 ч
+
+-- Вывод: подтверждается. Если разговор начал работодатель, приглашение получают 16,4%
+-- откликов, если кандидат — 10,8% (около 5%). Разница сохраняется в обоих каналах:
+-- при старте сообщением 15,3% против 9,5%, при старте звонком 20,3% против 15,6%,
+-- и во всех группах не меньше 30 откликов. По скорости, объёму и ритму группы почти не
+-- различаются (до первого контакта 76–80 ч, 3 коммуникации, пауза 25 ч), заметно
+-- отличается только канал: работодатель, начавший разговор сам, втрое чаще звонит
+-- (36,4% против 12,8%).
+-- Однако, отклики без коммуникаций приглашают почти так же часто (14,3%), то есть часть приглашений
+-- происходит вне видимой переписки и звонков. Но это не противоречит выводу, потому что гипотеза
+-- поставлена как сравнение внутри откликов, где коммуникация была.
+
+-- Гипотеза 2 ( ˘▽˘)っ: к приглашению, чаще ведет коммуникация с работодателями из регионов, а не из Москвы
+
+WITH valid_calls AS (
+  SELECT c.response_id,
+         c.employer_id,
+         c.call_id AS event_id,
+         c.call_at AS event_at,
+         'call' AS event_type
+    FROM calls c
+         JOIN responses r
+         ON r.response_id = c.response_id
+   WHERE c.caller_role = 'employer'
+),
+
+valid_messages AS (
+  SELECT m.response_id,
+         m.employer_id,
+         m.message_id AS event_id,
+         m.sent_at AS event_at,
+         'message' AS event_type
+    FROM messages m
+         JOIN responses r
+         ON r.response_id = m.response_id
+   WHERE m.sender_role = 'employer'
+),
+
+employer_events AS (
+  SELECT * FROM valid_calls
+  UNION ALL
+  SELECT * FROM valid_messages
+),
+
+timeline AS (
+  SELECT response_id,
+         employer_id,
+         event_id,
+         event_at,
+         event_type,
+         ROW_NUMBER() OVER w AS event_num,
+         LAG(event_at) OVER w AS prev_event_at
+    FROM employer_events
+  WINDOW w AS (
+    PARTITION BY response_id
+    ORDER BY event_at, event_type, event_id
+  )
+),
+
+gaps AS (
+  SELECT response_id,
+         event_id,
+         ROUND((DATE_PART('epoch', event_at - prev_event_at) / 3600)::NUMERIC, 2) AS time_from_previous
+    FROM timeline
+),
+
+response_mart AS (
+  SELECT r.response_id,
+         v.employer_id,
+         v.professional_role,
+         r.status AS response_status,
+         r.created_at,
+         COUNT(t.event_id) AS comm_cnt,
+         COUNT(t.event_id) FILTER (WHERE t.event_type = 'call') AS call_cnt,
+         COUNT(t.event_id) FILTER (WHERE t.event_type = 'message') AS msg_cnt,
+         MIN(t.event_at) AS first_comm_at,
+         ROUND((DATE_PART('epoch', MIN(t.event_at) - r.created_at) / 3600)::NUMERIC, 2) AS hours_to_first_comm,
+         MAX(g.time_from_previous) AS max_gap_hours
+    FROM responses r
+         JOIN vacancies v
+         ON v.vacancy_id = r.vacancy_id
+         LEFT JOIN timeline t
+         ON t.response_id = r.response_id
+         LEFT JOIN gaps g
+         ON g.response_id = t.response_id
+         AND g.event_id = t.event_id
+   GROUP BY r.response_id, v.employer_id, v.professional_role, r.status, r.created_at
+),
+
+response_level AS (
+  SELECT rm.*,
+         a.area_name,
+         CASE WHEN a.area_name = 'Москва' THEN 'Москва' ELSE 'регионы' END AS geo_label
+    FROM response_mart rm
+         JOIN employers e
+         ON e.employer_id = rm.employer_id
+         JOIN areas a
+         ON a.area_id = e.area_id
+   WHERE rm.comm_cnt > 0 --только отклики с коммуникацией
+)
+
+SELECT geo_label AS group_name,
+       COUNT(*) AS resp_cnt,
+       ROUND(100.0 * COUNT(*) FILTER (WHERE response_status = 'invited') / COUNT(*), 1) AS conversion_pct,
+       ROUND((PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY hours_to_first_comm))::NUMERIC, 2) AS median_hours_to_first_comm,
+       ROUND(AVG(comm_cnt), 2) AS avg_comm_cnt,
+       ROUND(100.0 * COUNT(*) FILTER (WHERE call_cnt > 0) / COUNT(*), 1) AS with_call_pct
+  FROM response_level
+ GROUP BY geo_label
+ ORDER BY (geo_label <> 'Москва');
+
+SELECT geo_label,
+       area_name AS city,
+       COUNT(*) AS resp_cnt,
+       ROUND(100.0 * COUNT(*) FILTER (WHERE response_status = 'invited') / COUNT(*), 1) AS conversion_pct,
+       ROUND((PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY hours_to_first_comm))::NUMERIC, 2) AS median_hours_to_first_comm,
+       ROUND(AVG(comm_cnt), 2) AS avg_comm_cnt,
+       ROUND(100.0 * COUNT(*) FILTER (WHERE call_cnt > 0) / COUNT(*), 1) AS with_call_pct
+  FROM response_level
+ GROUP BY geo_label, area_name
+ ORDER BY (geo_label <> 'Москва'), area_name;
+
+
+-- Комментарий:
+-- Отклики делим по городу работодателя: "Москва" и "регионы" целиком
+-- (основные группы), а регионы — ещё и по городам. Гипотеза говорит
+-- именно о коммуникации, поэтому главный показатель считаем только по откликам, где
+-- коммуникация была.
+
+-- Метрики (считаются только по откликам с коммуникацией):
+-- resp_cnt — число откликов в группе, показывает, насколько надёжны остальные цифры.
+-- conversion_pct — доля откликов, закончившихся приглашением.
+-- median_hours_to_first_comm — медиана часов от отклика до первого контакта.
+-- avg_comm_cnt — среднее число звонков и сообщений работодателя на отклик.
+-- with_call_pct — доля откликов, где работодатель хотя бы раз позвонил.
+
+-- Гипотеза подтверждается, если:
+-- 1) конверсия в регионах выше, чем в Москве;
+-- 2) разница не держится на одном городе: каждый город, где не меньше 30 откликов
+-- с коммуникацией, показывает конверсию выше московской;
+-- 3) в каждой сравниваемой группе не меньше 30 откликов с коммуникацией.
+
+--       	 	   откликов  invited  до 1-го контакта  ср. число коммуник.  со звонком
+-- Москва    		318      12,9%    80,75 ч           3,19                 29,9%
+-- регионы   		175      18,3%    74,33 ч           3,28                 30,3%
+
+-- Москва           318      12,9%    80,75 ч           3,19                 29,9%
+-- Екатеринбург     43       23,3%    53,67 ч           3,33                 32,6%
+-- Санкт-Петербург  61       16,4%    75,33 ч           3,34                 31,1%
+-- Казань           44       13,6%    57,00 ч           3,07                 25,0%
+-- Новосибирск      27       22,2%    80,67 ч           3,41                 33,3%
+
+-- Вывод: подтверждается. Все три заранее заданных условия выполнены: среди откликов
+-- с коммуникацией приглашение получают 18,3% откликов из регионов и 12,9% из Москвы;
+-- эффект не держится на одном городе (Екатеринбург 23,3%, Санкт-Петербург 16,4%,
+-- Казань 13,6% — все выше московского уровня); в обеих группах больше 30 откликов.
+-- Новосибирск (27 откликов) в оценке условия 2 не участвует, так как меньше 30.
+-- Скорость, объём и канал общения в Москве и регионах близки (3,2–3,3 коммуникации
+-- на отклик, 30% со звонком), поэтому дело не в том, что региональные работодатели
+-- общаются активнее.
+-- Оговорка: в каждом городе всего 2 работодателя (в Москве 4, всего 12), поэтому эффект
+-- города нельзя отделить от эффекта конкретных работодателей, а Казань почти не
+-- отличается от Москвы (13,6% против 12,9%). Это наблюдаемая связь, которую стоит
+-- перепроверить на выборке с большим числом работодателей.
+	
+
+-- ЗАДАНИЕ 8. Итог исследования
+
+-- После получения отклика работодатели реагируют на него не всегда и в основном письменно:
+-- из 628 откликов коммуникация в первые 7 дней была по 382 (около 61%), а 246 (около 39%)
+-- остались вообще без реакции. Всего за этот период зафиксировано 1096 событий работодателя,
+-- из них 988 (около 90%) — сообщения и только 108 — звонки, а первым контактом чаще всего тоже
+-- было сообщение (314 откликов из 382, то есть 82%), так что звонок служит скорее дополнительным
+-- инструментом. Звонки при этом используются на разных этапах отбора: теги screening, interview,
+-- follow_up и details распределены почти поровну (25, 31, 29 и 23), а сообщения работодатели чаще
+-- отправляют через веб (628 из 988, около 64%), вложения встречаются редко (около 4% в обоих
+-- каналах), поэтому коммуникация почти полностью текстовая. По скорости ответа в переписке
+-- работодатели различаются слабо: по 749 измеренным ответам медианы лежат в диапазоне от 3,93 ч
+-- (работодатель 107) до 4,9 ч, а p90 составляет 13–20 ч, то есть каждый десятый кандидат ждёт
+-- почти сутки. Сильнее работодатели и направления отличаются долей обработанных откликов: у лидеров
+-- она от 70,0% до 89,5%, а разрыв со вторым местом бывает большим (у дата-инженеров 70,0% против
+-- 45,8%). Связь с приглашением при этом неочевидна: у работодателя 103 обработано 84,8% откликов,
+-- но конверсия в приглашение лишь 10,1%, тогда как у лидеров среди тестировщиков (107 и 108) она
+-- 41,2% и 37,5%, то есть высокая доля обработки сама по себе не гарантирует приглашений.
+-- Ограничения анализа: у части работодателей слишком мало наблюдений (у 108 — 8 откликов, у 106 — 10,
+-- у 105 всего 6 ответов в переписке), поэтому их места и метрики неустойчивы; анализ ограничен
+-- 7-дневным окном, 8 звонков без response_id пришлось исключить, а данные наблюдательные, то есть мы
+-- видим связь, но не можем утверждать, что именно коммуникация приводит к приглашению. Следующим
+-- шагом я бы выяснила, почему 246 откликов остались без реакции (закрыта ли вакансия, отклонён ли
+-- отклик автоматически), и посмотрела бы, как меняется картина, если расширить окно за 7 дней и
+-- учесть дату самого приглашения.
+
