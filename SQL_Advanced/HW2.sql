@@ -612,7 +612,8 @@ response_mart AS (
 
 employer_stats AS (
   SELECT professional_role,
-         employer_id,
+         rm.employer_id,
+		 e.employer_name,
          COUNT(*) AS resp_cnt,
          COUNT(*) FILTER (WHERE comm_cnt > 0) AS processed_cnt,
          100.0 * COUNT(*) FILTER (WHERE comm_cnt > 0) 
@@ -621,8 +622,10 @@ employer_stats AS (
          PERCENTILE_CONT(0.9) WITHIN GROUP (ORDER BY hours_to_first_comm) AS p90_hours,
          100.0 * COUNT(*) FILTER (WHERE response_status = 'invited') 
 		 	   / NULLIF(COUNT(*), 0) AS conversion_pct
-    FROM response_mart
-   GROUP BY professional_role, employer_id
+    FROM response_mart rm
+	LEFT JOIN employers e
+	       ON rm.employer_id = e.employer_id
+   GROUP BY professional_role, rm.employer_id, e.employer_name
   HAVING COUNT(*) >= 8
 ),
 
@@ -637,6 +640,7 @@ ranked AS (
 
 SELECT professional_role,
 	   employer_id,
+	   employer_name,
        place,
        resp_cnt,
        processed_cnt,
@@ -1049,6 +1053,7 @@ SELECT initiator,
 -- начавший разговор сам, звонит почти в 4 раза чаще (33,8% против 8,7%). 
 
 -- Гипотеза 2 ( ˘▽˘)っ: к приглашению, чаще ведет коммуникация с работодателями из регионов, а не из Москвы
+-- окно - 7 дней с отклика
 
 WITH valid_calls AS (
   SELECT c.response_id,
@@ -1214,7 +1219,7 @@ SELECT geo_label,
 -- медиана скорости ответа у всех лежит в диапазоне 3,9–4,9 ч, но p90 доходит до 13–20 ч, то есть
 -- каждый десятый кандидат ждёт ответа почти сутки. Гораздо сильнее работодатели различаются
 -- долей обработанных откликов, при этом активная обработка сама по себе не гарантирует приглашений: 
--- у работодателя 103 в аналитике данных обработано 84,8% откликов, но конверсия лишь 10,1%.
+-- например, у работодателя DataWave (103) в аналитике данных обработано 84,8% откликов, но конверсия лишь 10,1%.
 -- При проверке гипотез инициатива работодателя оказалась связана с приглашением лишь слабо и данных
 -- оказалось недостаточно, чтобы сказать наверняка. Среди откликов с коммуникацией 
 -- региональные работодатели приглашают чаще московских (18,2% против 11,8%). Однако это просто 
